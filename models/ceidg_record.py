@@ -3,17 +3,17 @@
 # rules irrelevant for models
 from dataclasses import dataclass
 from typing import List, Optional
-from src.models.ceidg.DaneAdresowe import DaneAdresowe
-from src.models.ceidg.DaneDodatkowe import DaneDodatkowe
-from src.models.ceidg.DaneKontaktowe import DaneKontaktowe
-from src.models.ceidg.DanePodstawowe import DanePodstawowe
-from src.models.ceidg.InformacjeDotyczaceUpadlosciPostepowaniaNaprawczego \
+from models.ceidg.DaneAdresowe import DaneAdresowe
+from models.ceidg.DaneDodatkowe import DaneDodatkowe
+from models.ceidg.DaneKontaktowe import DaneKontaktowe
+from models.ceidg.DanePodstawowe import DanePodstawowe
+from models.ceidg.InformacjeDotyczaceUpadlosciPostepowaniaNaprawczego \
     import ListaInformacji
-from src.models.ceidg.SpolkiCywilneKtorychWspolnikiemJestPrzedsiebiorca \
+from models.ceidg.SpolkiCywilneKtorychWspolnikiemJestPrzedsiebiorca \
     import ListaInformacjiOSpolce
-from src.models.ceidg.Sukcesja import Sukcesja
-from src.models.ceidg.Uprawnienia import Uprawnienia
-from src.models.ceidg.Zakazy import ListaInformacjiOZakazie
+from models.ceidg.Sukcesja import Sukcesja
+from models.ceidg.Uprawnienia import Uprawnienia
+from models.ceidg.Zakazy import ListaInformacjiOZakazie
 
 
 @dataclass

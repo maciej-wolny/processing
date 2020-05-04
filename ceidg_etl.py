@@ -1,9 +1,10 @@
 import dataclasses
 import gc
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 import time
 import logging
+import pandas as pd
 
 from dacite import from_dict
 from google.cloud import bigquery
@@ -11,16 +12,17 @@ from zeep import Client, Settings
 import xmltodict
 from enum import Enum
 
-from src.config import BaseConfig
-from src.models.ceidg_record import InformacjaOWpisie
+from models.ceidg_record import InformacjaOWpisie
 
 OPTIMAL_BIGQUERY_BATCH_SIZE = 500
 
-PROJECT_ID = "simplify-docs"
-CEIDG_COLLECTION = "ceidg-prod"
-CEIDG_PROCESSED = "processed-ceidg-prod"
+PROJECT_ID = "simplify-docs-devint"
+DATASET_ID = 'entrepreneurship_data.ceidg'
+API_CEIDG_URL = 'https://datastore.ceidg.gov.pl/CEIDG.DataStore/services/' \
+                    'DataStoreProvider201901.svc?wsdl'
+API_CEIDG_TOKEN = '9MEGSBAE0dU5U6PlS9uJnQmEPJabgsbzn9Hkj+4UWKlb88InD1OYWE' \
+                      'C74ZW3TDFR'
 MAXIMUM_FIRESTORE_BATCH_SIZE = 500
-DAYS_IN_BATCH = 2
 
 total_documents_count = 0
 semaphore = threading.Semaphore(3)
@@ -86,17 +88,48 @@ def parse(records):
     return parsed_result
 
 
+class CEIDG:
+    instance = None
+
+    def __init__(self, project_id, dataset_id):
+        self._instance = bigquery.Client(project_id)
+        self.table_id = "{}.{}".format(project_id,
+                                       dataset_id)
+        self.existing_dates = self.get_all_dates_from_bq()
+
+    def get_all_dates_from_bq(self):
+        """Queries BQ to check for last first_entry_date within already inserted data."""
+        query_content = ('SELECT DISTINCT(DaneDodatkowe.DataRozpoczeciaWykonywaniaDzialalnosciGospodarczej)'
+                         ' FROM `{}`'.format(self.table_id))
+        query_job = self._instance.query(query_content)
+        rows = query_job.result()
+        return rows.to_dataframe()
+
+    def find_missing_dates(self):
+        """Finds missing dates in already inserted data between 1990-01-08 and current date."""
+        self.existing_dates['DataRozpoczeciaWykonywaniaDzialalnosciGospodarczej'] = pd.to_datetime(
+            self.existing_dates['DataRozpoczeciaWykonywaniaDzialalnosciGospodarczej'])
+        self.existing_dates.index = self.existing_dates[
+            'DataRozpoczeciaWykonywaniaDzialalnosciGospodarczej']
+        self.existing_dates.sort_index(inplace=True)
+        self.existing_dates.drop(columns=['DataRozpoczeciaWykonywaniaDzialalnosciGospodarczej'])
+        now = datetime.now()
+        now.strftime("%Y-%m-%d")
+        return pd.date_range(start='1990-01-08', end=now).difference(self.existing_dates.index)
+
+
 class CeidgEtl:
-    def __init__(self, start_date, project_id, dataset_id):
+    def __init__(self, missing_dates, project_id, dataset_id):
         self.semaphore = threading.Semaphore(3)
         self.lock = threading.Lock()
         self.client = bigquery.Client(project_id)
         self.dataset_id = dataset_id
-        self.current_date = datetime.strptime(start_date, '%Y-%m-%d')
+        self.current_date_index = 0
+        self.missing_dates = missing_dates
         self.current_page = 1
         self.processed = 0
         self.current_throttle = 0
-        self.url = BaseConfig.API_CEIDG_URL
+        self.url = API_CEIDG_URL
         settings = Settings(strict=False, xml_huge_tree=True)
         self.soap_client = Client(self.url, settings=settings)
 
@@ -130,20 +163,20 @@ class CeidgEtl:
         semaphore included. Dynamic throttle modification included as rejestr.io api limits are
         not known. Will retry until number of failed retries reaches FAILED_PAGES_THRESHOLD."""
         self.lock.acquire()
-        start_date = self.current_date
+        start_date = datetime.strftime(self.missing_dates[self.current_date_index], '%Y-%m-%d')
         # if start_date.strftime('%Y-%m-%d') == "1990-04-02":
         #     self.semaphore.release()
         #     raise Exception("End, processed %s", self.processed)
-        end_date = start_date + timedelta(days=DAYS_IN_BATCH - 1)
-        self.current_date = end_date + timedelta(days=1)
+        end_date = start_date
+        self.current_date_index += 1
         self.lock.release()
         self.semaphore.acquire()
-        logging.info("Starting to process batch [{} - {}]".format(start_date.strftime('%Y-%m-%d'),
-                                                                  end_date.strftime('%Y-%m-%d')))
+        logging.info("Starting to process batch [{} - {}]".format(start_date,
+                                                                  end_date))
         download_time = time.time()
-        request_data = {'AuthToken': BaseConfig.API_CEIDG_TOKEN,
-                        'DateFrom': start_date.strftime('%Y-%m-%d'),
-                        'DateTo': end_date.strftime('%Y-%m-%d')}
+        request_data = {'AuthToken': API_CEIDG_TOKEN,
+                        'DateFrom': start_date,
+                        'DateTo': end_date}
         try:
             ceidg_results = self.soap_client.service.GetMigrationData201901(**request_data)
         except ConnectionError:
@@ -152,7 +185,7 @@ class CeidgEtl:
             except ConnectionError:
                 self.semaphore.release()
                 raise ConnectionError(
-                    "batch [{} - {}]".format(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')))
+                    "batch [{} - {}]".format(start_date, end_date))
         log_execution_time(download_time, "Download took %s")
         parsed_time = time.time()
         parsed_results = xmltodict.parse(ceidg_results)['WynikWyszukiwania']['InformacjaOWpisie']
@@ -181,7 +214,11 @@ class CeidgEtl:
 
 
 if __name__ == '__main__':
-    etl = CeidgEtl("1980-01-01", "simplify-docs", "")
+    missing_dates = CEIDG(PROJECT_ID,
+                          DATASET_ID).find_missing_dates()
+    etl = CeidgEtl(missing_dates,
+                   PROJECT_ID,
+                   DATASET_ID)
     etl.run()
     # 3835 - 15 days
     # 161s      1 days - 4923 1 t
